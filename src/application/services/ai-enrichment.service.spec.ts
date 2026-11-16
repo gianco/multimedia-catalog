@@ -6,6 +6,7 @@ import {
   AiEnrichmentError,
   ClaudeAiEnrichmentService,
   DEFAULT_CLAUDE_MODEL,
+  EnrichmentNoMatchError,
 } from './ai-enrichment.service.js';
 import type { AiEnrichmentInput, ClaudeMessageResponse } from './ai-enrichment.service.js';
 import type { ToolDefinition, ToolGateway } from './tool-gateway.js';
@@ -144,6 +145,73 @@ describe('ClaudeAiEnrichmentService', () => {
     });
   });
 
+  describe('when the lookup matched nothing (no title)', () => {
+    it.each([
+      ['a null title', { title: null, classification: 'SF' }],
+      ['a missing title', { classification: 'SF' }],
+      ['an empty title', { title: '', classification: 'SF' }],
+      ['a blank title', { title: '  ', classification: 'SF' }],
+    ])(
+      'should throw an actionable EnrichmentNoMatchError when the answer has %s and no hint',
+      async (_label, payload) => {
+        answerWith(JSON.stringify(payload));
+
+        const promise = service.enrich(input);
+
+        await expect(promise).rejects.toThrow(EnrichmentNoMatchError);
+        await expect(promise).rejects.toThrow(AiEnrichmentError);
+        await expect(promise).rejects.toThrow(/No metadata found for book "9780306406157"/);
+        await expect(promise).rejects.toThrow(/title hint, or create the item manually/);
+      },
+    );
+
+    it.each([
+      ['a null title', { title: null, classification: 'SF' }],
+      ['an empty title', { title: ' ', classification: 'SF' }],
+      ['a missing title', { classification: 'SF' }],
+    ])('should use the title hint when the answer has %s', async (_label, payload) => {
+      answerWith(JSON.stringify(payload));
+
+      const metadata = await service.enrich({ ...input, hints: { title: '  The Hobbit ' } });
+
+      expect(metadata.title).toBe('The Hobbit');
+      expect(metadata.enrichmentCompleted).toBe(true);
+    });
+
+    it('should prefer the title of the answer over the hint', async () => {
+      answerWith(JSON.stringify(validAnswer));
+
+      const metadata = await service.enrich({ ...input, hints: { title: 'Something else' } });
+
+      expect(metadata.title).toBe('Dune');
+    });
+
+    it('should still throw EnrichmentNoMatchError when the hint is blank', async () => {
+      answerWith(JSON.stringify({ title: null, classification: 'SF' }));
+
+      await expect(service.enrich({ ...input, hints: { title: '  ' } })).rejects.toThrow(
+        EnrichmentNoMatchError,
+      );
+    });
+
+    it('should keep the generic error for a title that is not a string', async () => {
+      answerWith(JSON.stringify({ title: 7, classification: 'SF' }));
+
+      const promise = service.enrich(input);
+
+      await expect(promise).rejects.toThrow(AiEnrichmentError);
+      await expect(promise).rejects.not.toThrow(EnrichmentNoMatchError);
+    });
+
+    it('should tell Claude to answer with a null title instead of inventing one', async () => {
+      answerWith(JSON.stringify(validAnswer));
+
+      await service.enrich(input);
+
+      expect(client.messages.create.mock.calls[0]?.[0].system).toMatch(/set "title" to null/);
+    });
+  });
+
   describe('rejecting corrupted answers', () => {
     it.each([
       ['an empty text', ''],
@@ -187,8 +255,6 @@ describe('ClaudeAiEnrichmentService', () => {
     });
 
     it.each([
-      ['a missing title', { classification: 'SF' }, /"title"/],
-      ['an empty title', { title: '  ', classification: 'SF' }, /"title"/],
       ['a numeric title', { title: 7, classification: 'SF' }, /"title"/],
       ['a missing classification', { title: 'Dune' }, /"classification"/],
       ['an empty classification', { title: 'Dune', classification: '' }, /"classification"/],
@@ -373,6 +439,87 @@ describe('ClaudeAiEnrichmentService tool use', () => {
     expect(followUp?.[2]?.content).toEqual([
       expect.objectContaining({ tool_use_id: 'toolu_2', is_error: true }),
     ]);
+  });
+
+  describe('ISBN guard before tool execution', () => {
+    it.each([
+      ['isbn', { isbn: '978-0-306-40615-7', limit: 3 }, { isbn: '9780306406157', limit: 3 }],
+      ['isbn with label', { isbn: 'ISBN 0-306-40615-2' }, { isbn: '0306406152' }],
+      [
+        'idType/idValue',
+        { idType: 'isbn', idValue: '978 0 306 40615 7' },
+        { idType: 'isbn', idValue: '9780306406157' },
+      ],
+      [
+        'key/value (case-insensitive selector)',
+        { key: 'ISBN', value: 'ISBN-13: 978-0-306-40615-7', size: 'M' },
+        { key: 'ISBN', value: '9780306406157', size: 'M' },
+      ],
+    ])('passes only the normalized ISBN to the tool (%s)', async (_label, requested, expected) => {
+      client.messages.create
+        .mockResolvedValueOnce(toolUse('toolu_1', 'library__search', requested))
+        .mockResolvedValueOnce(finalAnswer);
+
+      await service.enrich(input);
+
+      expect(gateway.executeTool).toHaveBeenCalledTimes(1);
+      expect(gateway.executeTool).toHaveBeenCalledWith('library__search', expected);
+    });
+
+    it('does not touch the value of a non-ISBN identifier', async () => {
+      const requested = { idType: 'olid', idValue: 'OL7353617M' };
+      client.messages.create
+        .mockResolvedValueOnce(toolUse('toolu_1', 'library__search', requested))
+        .mockResolvedValueOnce(finalAnswer);
+
+      await service.enrich(input);
+
+      expect(gateway.executeTool).toHaveBeenCalledWith('library__search', requested);
+    });
+
+    it('does not mutate the arguments requested by Claude', async () => {
+      const requested = { isbn: '978-0-306-40615-7' };
+      client.messages.create
+        .mockResolvedValueOnce(toolUse('toolu_1', 'library__search', requested))
+        .mockResolvedValueOnce(finalAnswer);
+
+      await service.enrich(input);
+
+      expect(requested).toEqual({ isbn: '978-0-306-40615-7' });
+    });
+
+    it.each([
+      ['a wrong checksum', { isbn: '9780306406158' }],
+      ['a free-text query', { isbn: 'the hobbit OR subject:fantasy' }],
+      ['a non-string value', { isbn: 9780306406157 }],
+      ['an empty value', { isbn: '  ' }],
+      ['an invalid idValue for an ISBN idType', { idType: 'isbn', idValue: '12345' }],
+    ])('rejects %s without calling the tool', async (_label, requested) => {
+      client.messages.create
+        .mockResolvedValueOnce(toolUse('toolu_3', 'library__search', requested))
+        .mockResolvedValueOnce(finalAnswer);
+
+      await expect(service.enrich(input)).resolves.toMatchObject({ title: 'Dune' });
+
+      expect(gateway.executeTool).not.toHaveBeenCalled();
+      const followUp = client.messages.create.mock.calls[1]?.[0].messages;
+      expect(followUp?.[2]?.content).toEqual([
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_3',
+          content: 'Invalid ISBN: it must contain 10 or 13 valid digits.',
+          is_error: true,
+        },
+      ]);
+    });
+  });
+
+  it('tells Claude that tool results may be truncated samples', async () => {
+    client.messages.create.mockResolvedValue(finalAnswer);
+
+    await service.enrich(input);
+
+    expect(client.messages.create.mock.calls[0]?.[0].system).toMatch(/truncated samples/);
   });
 
   it('gives up when Claude keeps asking for tools, after a bounded number of rounds', async () => {

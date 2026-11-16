@@ -4,8 +4,6 @@ Questo repository raccoglie lo sviluppo di un **Catalogo Multimediale** desktop 
 
 L'obiettivo principale del progetto è dimostrare come sia possibile sviluppare un'applicazione desktop moderna, robusta, fortemente tipizzata e disaccoppiata in Node.js e TypeScript, ottimizzando l'architettura attraverso l'integrazione nativa del protocollo MCP e un uso strategico e modulare dell'AI.
 
-**Questo è un progetto didattico e personale, che ho utilizzato e utilizzerò per toccare con mano nuove tecnologie e prendere confidenza con esse**
-
 ---
 
 ## 🛠️ Stack Tecnologico e Ambiente di Lavoro
@@ -68,9 +66,9 @@ Act as an elite software engineer and software architect. Initialize a Domain-Dr
 ### 2. Il Problema del Knowledge Cutoff e il Pivot verso MCP
 
 Inserendo un codice ISBN-10 per _"Lo Hobbit"_ di Tolkien, l'arricchimento dell'AI restituiva valori `"Unknown"` a causa del limite temporale nativo del modello.
-Invece di scrivere client HTTP tradizionali verso API esterne, abbiamo fatto un pivot architetturale integrando il **Model Context Protocol (MCP)** di Anthropic.
+Invece di scrivere client HTTP tradizionali verso API esterne, ho fatto un pivot architetturale integrando il **Model Context Protocol (MCP)** di Anthropic.
 
-Abbiamo scritto un **MCP Client programmatico in Node.js** che lancia in background tramite `stdio` e `npx` due server MCP indipendenti:
+Ho scritto un **MCP Client programmatico in Node.js** che lancia in background tramite `stdio` e `npx` due server MCP indipendenti:
 
 - `mcp-open-library` per la risoluzione deterministica degli ISBN. [https://github.com/8enSmith/mcp-open-library](https://github.com/8enSmith/mcp-open-library)
 - `@cyanheads/musicbrainz-mcp-server@latest` per i Barcode di CD e Vinili, iniettando a runtime le variabili d'ambiente di sicurezza come `MUSICBRAINZ_CONTACT`. [https://github.com/cyanheads/musicbrainz-mcp-server](https://github.com/cyanheads/musicbrainz-mcp-server)
@@ -98,6 +96,14 @@ Please execute the following steps:
 Review the plan and show me the file diffs before saving.
 ```
 
+### 3. Protezione della Context Window & Agentic Governance (`.clinerules/`)
+
+Interrogando opere con centinaia di edizioni (come _"The Hobbit"_), il server MCP di Open Library restituiva payload JSON estesi che saturavano la context window o corrompevano il parsing. Ho risolto il problema a livello architetturale:
+
+- **Sanificazione preventiva nel dominio:** `IsbnVo` normalizza e valida rigorosamente gli input (10/13 cifre) prima che raggiungano il client MCP.
+- **Troncamento deterministico dei payload:** Le risposte grezze provenienti dai server MCP vengono filtrate e ridotte deterministicamente in TypeScript prima di rientrare nel ciclo `tool_result` verso Claude, preservando i campi essenziali e abbattendo il consumo di token.
+- **Governance modulare (`.clinerules/`):** Le convenzioni su Node.js 24 ESM, DDD tattico, isolamenti ACL e test co-locati in Jest sono versionate nel repository tramite regole condizionali per Cline.
+
 ## 🚀 Come Eseguire l'Applicazione in Sviluppo
 
 1. Assicurati di avere installato Node.js 24 ed `npm` sul tuo sistema Linux Kubuntu.
@@ -122,25 +128,3 @@ Review the plan and show me the file diffs before saving.
    ```bash
    npm run test
    ```
-
-## TODO
-
-### Risoluzione dei Bug di Payload su Grandi Opere
-
-Interrogando libri con centinaia di edizioni (come _"The Hobbit"_), il server MCP restituiva un JSON gigantesco che saturava la context window o corrompeva il parsing. Abbiamo risolto forzando la sanificazione dell'input all'interno di `IsbnVo` e istruendo l'ACL a filtrare i risultati, garantendo performance ottimali e consumi di token irrisori.
-
-#### 📝 Prompt abbozzato e non ancora utilizzato per il fix del payload:
-
-```text
-Act as an elite software engineer. We have a regression where querying a highly published book (like "The Hobbit") causes a failure due to an excessively large JSON payload returning from the Open Library MCP server, which breaks the parsing or context limits.
-
-We need to patch the system immediately. Please perform these steps:
-1. Inspect our IsbnVo file (locate it via @src/domain/ or wherever your Value Objects are stored). Ensure that its internal validation strictly strips all dashes, spaces, and formatting, enforcing a clean 10 or 13-digit raw string.
-2. Inspect our command handler at @src/application/commands/enrich-and-create-item.command.ts. Inside the tool resolution loop, right before calling `mcpClient.executeTool()`, inject a defensive sanitization step: ensure the `isbn` parameter passed to the tool is exactly the clean value from our `IsbnVo`, preventing broad or malformed queries.
-3. If the MCP response text still contains a large array, add a defensive slice or trunk mechanism in the handler's `parseFinalOutput` method to gracefully handle large payloads, or instruct Claude in the system prompt to: "Only parse the first matching edition from the tool result array to minimize token bloat."
-4. Run `npx tsc --noEmit` to verify type safety after this defensive patch.
-
-Show me the diff for approval before saving.
-```
-
----

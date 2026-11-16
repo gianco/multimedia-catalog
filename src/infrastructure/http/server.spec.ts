@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals
 import { DatabaseSync } from 'node:sqlite';
 import request from 'supertest';
 import type { Express } from 'express';
-import { AiEnrichmentError } from '../../application/services/ai-enrichment.service.js';
+import {
+  AiEnrichmentError,
+  EnrichmentNoMatchError,
+} from '../../application/services/ai-enrichment.service.js';
 import type { AiEnrichmentService } from '../../application/services/ai-enrichment.service.js';
 import { MetadataVo } from '../../domain/metadata.vo.js';
 import { SqliteCatalogItemRepository } from '../database/sqlite-catalog-item-repository.js';
@@ -198,6 +201,18 @@ describe('HTTP API (integration: Express + SQLite in memory + mocked AI)', () =>
         message: 'The AI answer is not valid JSON.',
       });
       expect(logError).toHaveBeenCalledTimes(1);
+      await expectCatalogEmpty();
+    });
+
+    it('answers 422 without logging an error when the lookup matched nothing', async () => {
+      const message = 'No metadata found for book "9780306406157": the AI answer has no "title".';
+      ai.enrich.mockRejectedValue(new EnrichmentNoMatchError(message));
+
+      const response = await create({ mode: 'enrich', kind: 'book', identifier: '9780306406157' });
+
+      expect(response.status).toBe(422);
+      expect(response.body.error).toEqual({ code: 'enrichment_no_match', message });
+      expect(logError).not.toHaveBeenCalled();
       await expectCatalogEmpty();
     });
 

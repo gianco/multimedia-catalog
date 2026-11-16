@@ -1,6 +1,9 @@
 import { DomainError } from '../../domain/domain.error.js';
 import { ItemNotFoundError } from '../../domain/item-not-found.error.js';
-import { AiEnrichmentError } from '../../application/services/ai-enrichment.service.js';
+import {
+  AiEnrichmentError,
+  EnrichmentNoMatchError,
+} from '../../application/services/ai-enrichment.service.js';
 
 /** The request is syntactically or structurally wrong (HTTP 400). */
 export class RequestValidationError extends Error {
@@ -63,6 +66,9 @@ export function mapErrorToHttp(error: unknown): MappedHttpError {
   }
   if (error instanceof DomainError) {
     return mapped(422, 'domain_violation', error.message);
+  }
+  if (error instanceof EnrichmentNoMatchError) {
+    return mapped(422, 'enrichment_no_match', error.message);
   }
   if (error instanceof AiEnrichmentError) {
     return mapped(502, 'ai_enrichment_failed', error.message, true);

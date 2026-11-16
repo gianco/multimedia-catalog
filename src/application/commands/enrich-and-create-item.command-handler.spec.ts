@@ -42,6 +42,21 @@ describe('EnrichAndCreateItemCommandHandler', () => {
       });
     });
 
+    it.each([
+      '978-0-306-40615-7',
+      ' 978 0 306 40615 7 ',
+      'ISBN 978-0-306-40615-7',
+      'ISBN-13: 978\u20130\u2013306\u201340615\u20137',
+    ])('never forwards the raw user input %j, only the clean ISBN', async (identifier) => {
+      await handler.execute({ kind: 'book', identifier });
+
+      expect(aiService.enrich).toHaveBeenCalledTimes(1);
+      expect(aiService.enrich).toHaveBeenCalledWith({
+        kind: 'book',
+        identifier: '9780306406157',
+      });
+    });
+
     it('forwards the optional hints', async () => {
       await handler.execute({ ...bookCommand, hints: { title: 'Dune' } });
 

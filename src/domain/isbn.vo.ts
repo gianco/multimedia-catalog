@@ -20,9 +20,16 @@ function computeIsbn13CheckDigit(first12Digits: string): number {
   return (10 - (sum % 10)) % 10;
 }
 
+/** Optional "ISBN", "ISBN:", "ISBN-10:" or "ISBN-13:" label printed before the code. */
+const ISBN_LABEL_PATTERN = /^\s*ISBN(?:[-\s]?1[03]\s*:|\s*:)?/i;
+
+/** Whitespace (incl. NBSP), ASCII/Unicode hyphens, soft hyphen and zero-width characters. */
+const FORMATTING_CHARS_PATTERN = /[\s\u00AD\u200B-\u200D\u2010-\u2015\u2212\uFEFF-]/g;
+
 /**
  * ISBN code (10 or 13 digits) of a book.
- * The value is stripped of hyphens and spaces and its checksum is validated as well.
+ * The value is stripped of the "ISBN" label, hyphens, spaces and other formatting characters,
+ * so it is always a clean primitive, and its checksum is validated as well.
  */
 export class IsbnVo {
   readonly value: string;
@@ -32,7 +39,10 @@ export class IsbnVo {
       throw new DomainError('ISBN: the value must be a string.');
     }
 
-    const cleaned = raw.replace(/[\s-]/g, '').toUpperCase();
+    const cleaned = raw
+      .replace(ISBN_LABEL_PATTERN, '')
+      .replace(FORMATTING_CHARS_PATTERN, '')
+      .toUpperCase();
 
     if (cleaned.length === 0) {
       throw new DomainError('ISBN: the value must not be empty.');

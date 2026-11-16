@@ -8,8 +8,12 @@ import type {
 } from '../../application/services/tool-gateway.js';
 import { MUSICBRAINZ_CONTACT_FALLBACK } from '../config/env.config.js';
 import type { AppConfig } from '../config/env.config.js';
+import { projectOpenLibraryResult } from './open-library-result.projector.js';
+import { truncateToolText } from './tool-result-truncator.js';
 
 export const TOOL_NAMESPACE_SEPARATOR = '__';
+/** Name of the server whose answers go through the Open Library projection. */
+export const OPEN_LIBRARY_SERVER_NAME = 'mcp-open-library';
 
 /** Anthropic only accepts tool names matching this pattern, up to 64 characters. */
 const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -38,7 +42,7 @@ export function createDefaultMcpServers(
   }
   return [
     {
-      name: 'mcp-open-library',
+      name: OPEN_LIBRARY_SERVER_NAME,
       params: { command: 'npx', args: ['-y', 'mcp-open-library'] },
     },
     {
@@ -77,12 +81,30 @@ function isTextBlock(block: unknown): block is { type: 'text'; text: string } {
   );
 }
 
-function toText(content: unknown): string {
+/**
+ * Shrinks one block of tool output. Open Library answers are first projected onto their essential
+ * fields (the top records keep `title`, `authors`, ISBNs...); whatever is not recognized, and every
+ * other server, goes through the generic structure-aware truncation.
+ */
+function shrinkBlock(text: string, serverName: string): string {
+  const projected =
+    serverName === OPEN_LIBRARY_SERVER_NAME ? projectOpenLibraryResult(text) : undefined;
+  return truncateToolText(projected ?? text, MAX_RESULT_LENGTH);
+}
+
+/**
+ * Renders the tool output as text, shrinking every block deterministically *before* it can reach
+ * the LLM (ACL boundary): oversized JSON (e.g. Open Library multi-edition arrays) is cut to its
+ * first entries and stays parsable, any other text is cut to `MAX_RESULT_LENGTH`.
+ */
+function toText(content: unknown, serverName: string): string {
   if (!Array.isArray(content)) {
     return '';
   }
   const text = content
-    .map((block: unknown) => (isTextBlock(block) ? block.text : JSON.stringify(block)))
+    .map((block: unknown) =>
+      shrinkBlock(isTextBlock(block) ? block.text : JSON.stringify(block), serverName),
+    )
     .join('\n');
   return text.length > MAX_RESULT_LENGTH
     ? `${text.slice(0, MAX_RESULT_LENGTH)}\n[truncated]`
@@ -135,7 +157,7 @@ export class McpClientService implements ToolGateway {
         { timeout: CALL_TIMEOUT_MS },
       );
       const content: unknown = 'content' in result ? result.content : [];
-      return { content: toText(content), isError: result.isError === true };
+      return { content: toText(content, entry.server.name), isError: result.isError === true };
     } catch (error) {
       throw new McpClientError(`Tool "${namespacedName}" could not be executed.`, {
         cause: error,
